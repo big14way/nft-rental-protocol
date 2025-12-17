@@ -1,0 +1,38 @@
+{
+  "chain": "stacks",
+  "uuid": "nft-rental-tracker",
+  "name": "NFT Rental Event Tracker",
+  "version": 1,
+  "networks": {
+    "testnet": {
+      "if_this": {
+        "scope": "print_event",
+        "contract_identifier": "YOUR_DEPLOYER_ADDRESS.rental-manager",
+        "contains": "event"
+      },
+      "then_that": {
+        "http_post": {
+          "url": "http://localhost:3002/api/rental-events",
+          "authorization_header": "Bearer YOUR_AUTH_TOKEN"
+        }
+      },
+      "start_block": 1,
+      "decode_clarity_values": true
+    },
+    "mainnet": {
+      "if_this": {
+        "scope": "print_event",
+        "contract_identifier": "YOUR_MAINNET_ADDRESS.rental-manager",
+        "contains": "event"
+      },
+      "then_that": {
+        "http_post": {
+          "url": "https://your-api.com/api/rental-events",
+          "authorization_header": "Bearer YOUR_AUTH_TOKEN"
+        }
+      },
+      "start_block": 1,
+      "decode_clarity_values": true
+    }
+  }
+}

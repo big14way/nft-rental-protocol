@@ -1,0 +1,26 @@
+[project]
+name = "nft-rental-protocol"
+description = "NFT rental marketplace with Chainhook integration for tracking rentals, fees, and user activity"
+authors = ["Builder"]
+telemetry = false
+cache_dir = "./.cache"
+requirements = []
+
+[contracts.rental-manager]
+path = "contracts/rental-manager.clar"
+clarity_version = 4
+epoch = 3.3
+
+[contracts.rental-nft]
+path = "contracts/rental-nft.clar"
+clarity_version = 4
+epoch = 3.3
+
+[repl.analysis]
+passes = ["check_checker"]
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
