@@ -461,3 +461,4 @@
         
         (ok true)))
 (define-data-var rental-var-1 uint u1)
+(define-data-var rental-var-2 uint u2)
