@@ -460,3 +460,4 @@
         })
         
         (ok true)))
+(define-data-var rental-var-1 uint u1)
