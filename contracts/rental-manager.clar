@@ -464,3 +464,4 @@
 (define-data-var rental-var-2 uint u2)
 (define-data-var rental-var-3 uint u3)
 (define-data-var rental-var-4 uint u4)
+(define-data-var rental-var-5 uint u5)
