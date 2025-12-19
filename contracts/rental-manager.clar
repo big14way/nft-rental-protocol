@@ -15,6 +15,8 @@
 (define-constant ERR_RENTAL_EXPIRED (err u21008))
 (define-constant ERR_EXTENSION_NOT_ALLOWED (err u21009))
 (define-constant ERR_INVALID_EXTENSION (err u21010))
+(define-constant ERR_INVALID_DISCOUNT (err u21011))
+(define-constant ERR_DISCOUNT_EXISTS (err u21012))
 
 ;; Listing status
 (define-constant STATUS_AVAILABLE u0)
@@ -39,6 +41,8 @@
 (define-data-var total-unique-renters uint u0)
 (define-data-var total-extensions uint u0)
 (define-data-var extension-enabled bool true)
+(define-data-var total-discounted-rentals uint u0)
+(define-data-var total-discount-savings uint u0)
 
 ;; ========================================
 ;; Data Maps
@@ -95,6 +99,19 @@
 
 ;; Active rental by listing
 (define-map active-rentals uint uint)
+
+;; Duration-based discounts per listing
+(define-map duration-discounts
+    { listing-id: uint, tier: uint }
+    {
+        min-hours: uint,
+        discount-bps: uint,
+        created-at: uint
+    }
+)
+
+;; Track discount tier count per listing
+(define-map discount-tier-count uint uint)
 
 ;; ========================================
 ;; Traits
@@ -581,3 +598,217 @@
                 }))
             (err ERR_LISTING_NOT_FOUND))
         (err ERR_RENTAL_NOT_FOUND)))
+
+;; ========================================
+;; Duration Discount Functions
+;; ========================================
+
+;; Add duration-based discount tier to listing
+(define-public (add-duration-discount (listing-id uint) (min-hours uint) (discount-bps uint))
+    (let ((listing (unwrap! (map-get? listings listing-id) ERR_LISTING_NOT_FOUND))
+          (tier-count (default-to u0 (map-get? discount-tier-count listing-id)))
+          (tier-id (+ tier-count u1)))
+        ;; Validations
+        (asserts! (is-eq tx-sender (get owner listing)) ERR_NOT_AUTHORIZED)
+        (asserts! (> min-hours u0) ERR_INVALID_DISCOUNT)
+        (asserts! (> discount-bps u0) ERR_INVALID_DISCOUNT)
+        (asserts! (<= discount-bps u5000) ERR_INVALID_DISCOUNT) ;; Max 50% discount
+        (asserts! (< tier-count u5) ERR_DISCOUNT_EXISTS) ;; Max 5 tiers per listing
+
+        ;; Create discount tier
+        (map-set duration-discounts { listing-id: listing-id, tier: tier-id } {
+            min-hours: min-hours,
+            discount-bps: discount-bps,
+            created-at: stacks-block-time
+        })
+
+        ;; Update tier count
+        (map-set discount-tier-count listing-id tier-id)
+
+        ;; Emit event
+        (print {
+            event: "duration-discount-added",
+            listing-id: listing-id,
+            tier: tier-id,
+            min-hours: min-hours,
+            discount-bps: discount-bps,
+            timestamp: stacks-block-time
+        })
+
+        (ok tier-id)))
+
+;; Calculate applicable discount for duration
+(define-read-only (calculate-discount (listing-id uint) (duration-hours uint))
+    (let ((tier-count (default-to u0 (map-get? discount-tier-count listing-id))))
+        (if (is-eq tier-count u0)
+            { listing-id: listing-id, duration-hours: duration-hours, best-discount: u0 }
+            (fold find-best-discount (list u1 u2 u3 u4 u5)
+                { listing-id: listing-id, duration-hours: duration-hours, best-discount: u0 }))))
+
+(define-private (find-best-discount (tier uint) (acc { listing-id: uint, duration-hours: uint, best-discount: uint }))
+    (match (map-get? duration-discounts { listing-id: (get listing-id acc), tier: tier })
+        discount-tier (if (>= (get duration-hours acc) (get min-hours discount-tier))
+                         (if (> (get discount-bps discount-tier) (get best-discount acc))
+                             (merge acc { best-discount: (get discount-bps discount-tier) })
+                             acc)
+                         acc)
+        acc))
+
+;; Rent with duration discount
+(define-public (rent-nft-with-discount (listing-id uint) (duration-hours uint))
+    (let ((caller tx-sender)
+          (listing (unwrap! (map-get? listings listing-id) ERR_LISTING_NOT_FOUND))
+          (rental-id (+ (var-get rental-counter) u1))
+          (current-time stacks-block-time)
+          (duration-seconds (* duration-hours u3600))
+          (end-time (+ current-time duration-seconds))
+          (base-price (* (get price-per-hour listing) duration-hours))
+          (discount-bps (get best-discount (calculate-discount listing-id duration-hours)))
+          (discount-amount (/ (* base-price discount-bps) u10000))
+          (discounted-price (- base-price discount-amount))
+          (fee (calculate-fee discounted-price))
+          (owner-amount (- discounted-price fee))
+          (total-payment (+ discounted-price (get collateral-required listing))))
+        ;; Validations
+        (asserts! (is-eq (get status listing) STATUS_AVAILABLE) ERR_ALREADY_RENTED)
+        (asserts! (not (is-rental-active listing-id)) ERR_ALREADY_RENTED)
+        (asserts! (>= duration-seconds (get min-duration listing)) ERR_INVALID_DURATION)
+        (asserts! (<= duration-seconds (get max-duration listing)) ERR_INVALID_DURATION)
+
+        ;; Transfer payment + collateral
+        (try! (stx-transfer? total-payment caller (var-get contract-principal)))
+
+        ;; Pay owner (minus fee)
+        (try! (stx-transfer? owner-amount (var-get contract-principal) (get owner listing)))
+
+        ;; Pay protocol fee
+        (try! (stx-transfer? fee (var-get contract-principal) CONTRACT_OWNER))
+
+        ;; Create rental record
+        (map-set rentals rental-id {
+            listing-id: listing-id,
+            renter: caller,
+            start-time: current-time,
+            end-time: end-time,
+            total-price: discounted-price,
+            collateral: (get collateral-required listing),
+            returned: false,
+            created-at: current-time
+        })
+
+        ;; Update listing
+        (map-set listings listing-id (merge listing {
+            status: STATUS_RENTED,
+            total-rentals: (+ (get total-rentals listing) u1),
+            total-earnings: (+ (get total-earnings listing) owner-amount)
+        }))
+
+        ;; Track active rental
+        (map-set active-rentals listing-id rental-id)
+
+        ;; Update counters
+        (var-set rental-counter rental-id)
+        (var-set total-active-rentals (+ (var-get total-active-rentals) u1))
+        (var-set total-rental-volume (+ (var-get total-rental-volume) discounted-price))
+        (var-set total-fees-collected (+ (var-get total-fees-collected) fee))
+
+        ;; Track discount stats if discount was applied
+        (if (> discount-amount u0)
+            (begin
+                (var-set total-discounted-rentals (+ (var-get total-discounted-rentals) u1))
+                (var-set total-discount-savings (+ (var-get total-discount-savings) discount-amount))
+                true)
+            true)
+
+        ;; Update user stats
+        (update-renter-stats caller discounted-price fee)
+
+        ;; Update owner earnings
+        (match (map-get? user-stats (get owner listing))
+            stats (map-set user-stats (get owner listing) (merge stats {
+                total-earned: (+ (get total-earned stats) owner-amount)
+            }))
+            true)
+
+        ;; EMIT EVENT: rental-started-with-discount
+        (print {
+            event: "rental-started-with-discount",
+            rental-id: rental-id,
+            listing-id: listing-id,
+            renter: caller,
+            owner: (get owner listing),
+            base-price: base-price,
+            discount-bps: discount-bps,
+            discount-amount: discount-amount,
+            final-price: discounted-price,
+            duration-hours: duration-hours,
+            end-time: end-time,
+            collateral: (get collateral-required listing),
+            timestamp: current-time
+        })
+
+        ;; EMIT EVENT: fee-collected
+        (print {
+            event: "fee-collected",
+            rental-id: rental-id,
+            fee-type: "discounted-rental",
+            amount: fee,
+            timestamp: current-time
+        })
+
+        (ok { rental-id: rental-id, discount-saved: discount-amount, final-price: discounted-price })))
+
+;; Remove duration discount tier
+(define-public (remove-duration-discount (listing-id uint) (tier uint))
+    (let ((listing (unwrap! (map-get? listings listing-id) ERR_LISTING_NOT_FOUND)))
+        (asserts! (is-eq tx-sender (get owner listing)) ERR_NOT_AUTHORIZED)
+        (asserts! (is-some (map-get? duration-discounts { listing-id: listing-id, tier: tier })) ERR_INVALID_DISCOUNT)
+
+        (map-delete duration-discounts { listing-id: listing-id, tier: tier })
+
+        (print {
+            event: "duration-discount-removed",
+            listing-id: listing-id,
+            tier: tier,
+            timestamp: stacks-block-time
+        })
+
+        (ok true)))
+
+;; Get all discount tiers for a listing
+(define-read-only (get-discount-tiers (listing-id uint))
+    (let ((tier-count (default-to u0 (map-get? discount-tier-count listing-id))))
+        {
+            tier-1: (map-get? duration-discounts { listing-id: listing-id, tier: u1 }),
+            tier-2: (map-get? duration-discounts { listing-id: listing-id, tier: u2 }),
+            tier-3: (map-get? duration-discounts { listing-id: listing-id, tier: u3 }),
+            tier-4: (map-get? duration-discounts { listing-id: listing-id, tier: u4 }),
+            tier-5: (map-get? duration-discounts { listing-id: listing-id, tier: u5 }),
+            total-tiers: tier-count
+        }))
+
+;; Get discount statistics
+(define-read-only (get-discount-stats)
+    {
+        total-discounted-rentals: (var-get total-discounted-rentals),
+        total-savings: (var-get total-discount-savings)
+    })
+
+;; Preview rental price with discount
+(define-read-only (preview-rental-price (listing-id uint) (duration-hours uint))
+    (match (map-get? listings listing-id)
+        listing (let ((base-price (* (get price-per-hour listing) duration-hours))
+                     (discount-bps (get best-discount (calculate-discount listing-id duration-hours)))
+                     (discount-amount (/ (* base-price discount-bps) u10000))
+                     (discounted-price (- base-price discount-amount))
+                     (fee (calculate-fee discounted-price)))
+            (ok {
+                base-price: base-price,
+                discount-bps: discount-bps,
+                discount-amount: discount-amount,
+                final-price: discounted-price,
+                protocol-fee: fee,
+                total-with-collateral: (+ discounted-price (get collateral-required listing)),
+                savings-percent: (if (> base-price u0) (/ (* discount-bps u100) u10000) u0)
+            }))
+        (err ERR_LISTING_NOT_FOUND)))
