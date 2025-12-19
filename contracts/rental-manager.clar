@@ -13,6 +13,8 @@
 (define-constant ERR_RENTAL_ACTIVE (err u21006))
 (define-constant ERR_INVALID_PRICE (err u21007))
 (define-constant ERR_RENTAL_EXPIRED (err u21008))
+(define-constant ERR_EXTENSION_NOT_ALLOWED (err u21009))
+(define-constant ERR_INVALID_EXTENSION (err u21010))
 
 ;; Listing status
 (define-constant STATUS_AVAILABLE u0)
@@ -35,6 +37,8 @@
 (define-data-var total-fees-collected uint u0)
 (define-data-var total-active-rentals uint u0)
 (define-data-var total-unique-renters uint u0)
+(define-data-var total-extensions uint u0)
+(define-data-var extension-enabled bool true)
 
 ;; ========================================
 ;; Data Maps
@@ -458,10 +462,122 @@
             owner: caller,
             timestamp: stacks-block-time
         })
-        
+
         (ok true)))
-(define-data-var rental-var-1 uint u1)
-(define-data-var rental-var-2 uint u2)
-(define-data-var rental-var-3 uint u3)
-(define-data-var rental-var-4 uint u4)
-(define-data-var rental-var-5 uint u5)
+
+;; ========================================
+;; Rental Extension Functions
+;; ========================================
+
+;; Extend an active rental
+(define-public (extend-rental (rental-id uint) (extension-hours uint))
+    (let ((rental (unwrap! (map-get? rentals rental-id) ERR_RENTAL_NOT_FOUND))
+          (listing (unwrap! (map-get? listings (get listing-id rental)) ERR_LISTING_NOT_FOUND))
+          (extension-duration (* extension-hours u3600))
+          (extension-price (* (get price-per-hour listing) extension-hours))
+          (current-time stacks-block-time))
+
+        ;; Validations
+        (asserts! (var-get extension-enabled) ERR_EXTENSION_NOT_ALLOWED)
+        (asserts! (is-eq tx-sender (get renter rental)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get returned rental)) ERR_RENTAL_NOT_FOUND)
+        (asserts! (< current-time (get end-time rental)) ERR_RENTAL_EXPIRED)
+        (asserts! (> extension-hours u0) ERR_INVALID_EXTENSION)
+
+        ;; Check extension doesn't exceed max duration
+        (let ((new-total-duration (+ (- (get end-time rental) (get start-time rental)) extension-duration)))
+            (asserts! (<= new-total-duration (get max-duration listing)) ERR_INVALID_EXTENSION))
+
+        ;; Calculate fees
+        (let ((protocol-fee (/ (* extension-price PROTOCOL_FEE_BPS) u10000))
+              (owner-payment (- extension-price protocol-fee))
+              (new-end-time (+ (get end-time rental) extension-duration)))
+
+            ;; Transfer extension payment
+            (try! (stx-transfer? extension-price tx-sender (var-get contract-principal)))
+            (try! (stx-transfer? owner-payment (var-get contract-principal) (get owner listing)))
+
+            ;; Update rental
+            (map-set rentals rental-id (merge rental {
+                end-time: new-end-time,
+                total-price: (+ (get total-price rental) extension-price)
+            }))
+
+            ;; Update listing stats
+            (map-set listings (get listing-id rental) (merge listing {
+                total-earnings: (+ (get total-earnings listing) extension-price)
+            }))
+
+            ;; Update stats
+            (var-set total-rental-volume (+ (var-get total-rental-volume) extension-price))
+            (var-set total-fees-collected (+ (var-get total-fees-collected) protocol-fee))
+            (var-set total-extensions (+ (var-get total-extensions) u1))
+
+            ;; Emit Chainhook event
+            (print {
+                event: "rental-extended",
+                rental-id: rental-id,
+                listing-id: (get listing-id rental),
+                renter: tx-sender,
+                extension-hours: extension-hours,
+                extension-price: extension-price,
+                new-end-time: new-end-time,
+                protocol-fee: protocol-fee,
+                timestamp: current-time
+            })
+
+            (ok {
+                new-end-time: new-end-time,
+                extension-price: extension-price,
+                fee: protocol-fee
+            }))))
+
+;; Toggle extension feature (admin only)
+(define-public (toggle-extension-feature)
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (var-set extension-enabled (not (var-get extension-enabled)))
+        (print { event: "extension-feature-toggled", enabled: (var-get extension-enabled), by: tx-sender })
+        (ok (var-get extension-enabled))))
+
+;; Get extension statistics
+(define-read-only (get-extension-stats)
+    {
+        total-extensions: (var-get total-extensions),
+        extension-enabled: (var-get extension-enabled)
+    })
+
+;; Check if rental can be extended
+(define-read-only (can-extend-rental (rental-id uint))
+    (match (map-get? rentals rental-id)
+        rental (match (map-get? listings (get listing-id rental))
+            listing (let ((current-time stacks-block-time))
+                {
+                    can-extend: (and (var-get extension-enabled)
+                                    (not (get returned rental))
+                                    (< current-time (get end-time rental))),
+                    time-remaining: (if (> (get end-time rental) current-time)
+                                      (- (get end-time rental) current-time)
+                                      u0),
+                    max-additional-hours: (let ((current-duration (- (get end-time rental) (get start-time rental)))
+                                               (max-duration (get max-duration listing)))
+                                             (if (> max-duration current-duration)
+                                               (/ (- max-duration current-duration) u3600)
+                                               u0))
+                })
+            { can-extend: false, time-remaining: u0, max-additional-hours: u0 })
+        { can-extend: false, time-remaining: u0, max-additional-hours: u0 }))
+
+;; Calculate extension price
+(define-read-only (calculate-extension-price (rental-id uint) (extension-hours uint))
+    (match (map-get? rentals rental-id)
+        rental (match (map-get? listings (get listing-id rental))
+            listing (let ((extension-price (* (get price-per-hour listing) extension-hours))
+                         (protocol-fee (/ (* extension-price PROTOCOL_FEE_BPS) u10000)))
+                (ok {
+                    total-price: extension-price,
+                    protocol-fee: protocol-fee,
+                    owner-payment: (- extension-price protocol-fee)
+                }))
+            (err ERR_LISTING_NOT_FOUND))
+        (err ERR_RENTAL_NOT_FOUND)))
