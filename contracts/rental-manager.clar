@@ -812,3 +812,18 @@
                 savings-percent: (if (> base-price u0) (/ (* discount-bps u100) u10000) u0)
             }))
         (err ERR_LISTING_NOT_FOUND)))
+
+;; Insurance pool for damaged NFTs
+(define-data-var insurance-pool-balance uint u0)
+(define-map rental-insurance uint { premium-paid: uint, coverage-amount: uint, claimed: bool })
+
+(define-public (purchase-insurance (listing-id uint) (rental-id uint) (coverage uint))
+    (let ((premium (/ coverage u20)))
+        (try! (stx-transfer? premium tx-sender (var-get contract-principal)))
+        (var-set insurance-pool-balance (+ (var-get insurance-pool-balance) premium))
+        (map-set rental-insurance rental-id { premium-paid: premium, coverage-amount: coverage, claimed: false })
+        (print { event: "insurance-purchased", rental-id: rental-id, premium: premium, coverage: coverage, timestamp: stacks-block-time })
+        (ok true)))
+
+(define-read-only (get-insurance (rental-id uint))
+    (map-get? rental-insurance rental-id))
