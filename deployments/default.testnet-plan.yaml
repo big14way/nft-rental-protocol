@@ -9,16 +9,23 @@ plan:
     - id: 0
       transactions:
         - contract-publish:
+            contract-name: rental-insurance
+            expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            cost: 12139089
+            path: contracts/rental-insurance.clar
+            anchor-block-only: true
+            clarity-version: 4
+        - contract-publish:
             contract-name: rental-manager
             expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            cost: 17333839
+            cost: 12422917
             path: contracts/rental-manager.clar
             anchor-block-only: true
             clarity-version: 4
         - contract-publish:
             contract-name: rental-nft
             expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            cost: 17129948
+            cost: 12106340
             path: contracts/rental-nft.clar
             anchor-block-only: true
             clarity-version: 4
