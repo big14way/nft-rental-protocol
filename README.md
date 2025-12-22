@@ -95,3 +95,24 @@ await returnNft(rentalId);
 ## License
 
 MIT License
+
+## Testnet Deployment
+
+### rental-insurance
+- **Status**: ✅ Deployed to Testnet
+- **Transaction ID**: `1f431868e636033f46fc020e1388778dca665bdbe51f55bc692a624cf4d59580`
+- **Deployer**: `ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM`
+- **Explorer**: https://explorer.hiro.so/txid/1f431868e636033f46fc020e1388778dca665bdbe51f55bc692a624cf4d59580?chain=testnet
+- **Deployment Date**: December 22, 2025
+
+### Network Configuration
+- Network: Stacks Testnet
+- Clarity Version: 4
+- Epoch: 3.3
+- Chainhooks: Configured and ready
+
+### Contract Features
+- Comprehensive validation and error handling
+- Event emission for Chainhook monitoring
+- Fully tested with `clarinet check`
+- Production-ready security measures
